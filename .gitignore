@@ -1,0 +1,10 @@
+# ignore .env
+.env
+
+# ignore venv dir
+venv/
+
+# ignore working directories
+summaries/
+database/
+logs/
