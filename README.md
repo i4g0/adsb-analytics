@@ -1,6 +1,6 @@
 # ADS-B Analytics
 
-A comprehensive ADS-B (Automatic Dependent Surveillance-Broadcast) aircraft tracking and analysis system for Raspberry Pi. This project collects real-time aircraft data from your local ADS-B receiver, enriches it with registration information, and generates daily summaries using AI.
+A comprehensive ADS-B (Automatic Dependent Surveillance-Broadcast) aircraft tracking and analysis system for Raspberry Pi. This project collects real-time aircraft data from your local ADS-B receiver, enriches it with registration information, and generates daily summaries using OpenAI's API.
 
 ## Features
 
@@ -120,7 +120,7 @@ Enriches aircraft data with registration and operator information.
   - `--help`: Show usage information
 
 ### summarize_daily.py
-Generates AI-powered daily summaries using OpenAI GPT-4.
+Generates AI-powered daily summaries using OpenAI API (I'm using gpt-4o-mini).
 - Identifies interesting aircraft (military, police, medical)
 - Analyzes traffic patterns by operator and aircraft type
 - Creates human-readable reports
