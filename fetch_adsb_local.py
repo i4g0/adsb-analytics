@@ -58,7 +58,7 @@ def store_data(aircraft_list: list[dict[str, Any]]) -> None:
         position_count = 0
 
         for aircraft in aircraft_list:
-            # Store ALL aircraft with hex codes (even without position)
+            # Store ALL aircraft with hex codes
             if aircraft.get("hex"):
                 lat = aircraft.get("lat")
                 lon = aircraft.get("lon")
@@ -71,7 +71,7 @@ def store_data(aircraft_list: list[dict[str, Any]]) -> None:
                     lon,
                     aircraft.get("alt_baro"),
                     aircraft.get("track"),
-                    aircraft.get("gs"),  # Fixed: was 'speed', should be 'gs'
+                    aircraft.get("gs"),
                     aircraft.get("squawk"),
                     aircraft.get("category"),
                     aircraft.get("rssi")

@@ -16,7 +16,7 @@ DEBUG = "--debug" in sys.argv
 RECENT_DAYS = int(sys.argv[sys.argv.index("--days") + 1]) if "--days" in sys.argv else 7
 BATCH_SIZE = int(sys.argv[sys.argv.index("--batch-size") + 1]) if "--batch-size" in sys.argv else 100
 
-# Create enrichment table (same as before)
+# Create enrichment table
 CREATE_ENRICHMENT_TABLE = """
 CREATE TABLE IF NOT EXISTS aircraft_enriched (
     hex TEXT PRIMARY KEY,
@@ -136,7 +136,7 @@ def get_stats() -> dict:
         }
 
 def enrich_from_adsbdb(hex_code: str) -> Optional[Dict]:
-    """Use the free ADS-B Database API - no key required!"""
+    """Use the free ADS-B Database API """
     try:
         hex_clean = hex_code.strip().upper()
         url = f"https://api.adsbdb.com/v0/aircraft/{hex_clean}"
