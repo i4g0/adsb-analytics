@@ -50,7 +50,7 @@ def get_today_records() -> dict:
     
     aircraft_data = cursor.fetchall()
     
-    # Get interesting statistics - FIXED: use a.hex not e.hex
+    # Get interesting statistics
     cursor.execute("""
         SELECT 
             COUNT(DISTINCT a.hex) as total_aircraft,
