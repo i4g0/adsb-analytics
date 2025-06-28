@@ -8,3 +8,11 @@ venv/
 summaries/
 database/
 logs/
+secrets/
+data/
+
+# ignore git
+.git/
+
+# ignore logs
+*.log

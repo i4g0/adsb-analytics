@@ -24,13 +24,16 @@ CREATE TABLE IF NOT EXISTS aircraft (
     lon REAL,
     alt_baro INTEGER,
     track REAL,
-    speed INTEGER
+    speed INTEGER,
+    squawk TEXT,
+    category TEXT,
+    rssi REAL
 )
 """
 
 INSERT_SQL = """
-INSERT INTO aircraft (timestamp, hex, flight, lat, lon, alt_baro, track, speed)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO aircraft (timestamp, hex, flight, lat, lon, alt_baro, track, speed, squawk, category, rssi)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 # --- Fetch ADS-B JSON ---
@@ -51,21 +54,34 @@ def store_data(aircraft_list: list[dict[str, Any]]) -> None:
         cursor.execute(CREATE_TABLE_SQL)
 
         now = datetime.now(timezone.utc).isoformat()
+        stored_count = 0
+        position_count = 0
 
         for aircraft in aircraft_list:
-            cursor.execute(INSERT_SQL, (
-                now,
-                aircraft.get("hex"),
-                aircraft.get("flight"),
-                aircraft.get("lat"),
-                aircraft.get("lon"),
-                aircraft.get("alt_baro"),
-                aircraft.get("track"),
-                aircraft.get("speed"),
-            ))
+            # Store ALL aircraft with hex codes (even without position)
+            if aircraft.get("hex"):
+                lat = aircraft.get("lat")
+                lon = aircraft.get("lon")
+                
+                cursor.execute(INSERT_SQL, (
+                    now,
+                    aircraft.get("hex"),
+                    aircraft.get("flight", "").strip() if aircraft.get("flight") else None,
+                    lat,
+                    lon,
+                    aircraft.get("alt_baro"),
+                    aircraft.get("track"),
+                    aircraft.get("gs"),  # Fixed: was 'speed', should be 'gs'
+                    aircraft.get("squawk"),
+                    aircraft.get("category"),
+                    aircraft.get("rssi")
+                ))
+                stored_count += 1
+                if lat and lon:
+                    position_count += 1
 
         conn.commit()
-        print(f"[INFO] Stored {len(aircraft_list)} aircraft records at {now}")
+        print(f"[INFO] Stored {stored_count} aircraft ({position_count} with position) at {now}")
 
 def main() -> None:
     aircraft_data = fetch_adsb_data()
@@ -76,4 +92,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
