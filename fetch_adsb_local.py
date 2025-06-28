@@ -65,7 +65,7 @@ def store_data(aircraft_list: list[dict[str, Any]]) -> None:
                 
                 cursor.execute(INSERT_SQL, (
                     now,
-                    aircraft.get("hex"),
+                    aircraft.get("hex").upper() if aircraft.get("hex") else None,
                     aircraft.get("flight", "").strip() if aircraft.get("flight") else None,
                     lat,
                     lon,

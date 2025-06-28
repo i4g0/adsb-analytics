@@ -5,7 +5,7 @@ import requests
 import time
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -13,9 +13,10 @@ DB_PATH = Path.home() / "adsb-analytics" / "database" / "adsb_data.db"
 
 # Command line arguments
 DEBUG = "--debug" in sys.argv
-BACKFILL = "--backfill" in sys.argv
+RECENT_DAYS = int(sys.argv[sys.argv.index("--days") + 1]) if "--days" in sys.argv else 7
+BATCH_SIZE = int(sys.argv[sys.argv.index("--batch-size") + 1]) if "--batch-size" in sys.argv else 100
 
-# Create enrichment table
+# Create enrichment table (same as before)
 CREATE_ENRICHMENT_TABLE = """
 CREATE TABLE IF NOT EXISTS aircraft_enriched (
     hex TEXT PRIMARY KEY,
@@ -39,45 +40,104 @@ def setup_enrichment_table():
         conn.execute(CREATE_ENRICHMENT_TABLE)
         conn.commit()
 
-def get_unenriched_hex_codes(limit: Optional[int] = None) -> list[str]:
-    """Get hex codes that haven't been enriched yet."""
+def get_recent_unenriched_hex_codes(days: int = 7, limit: int = 100) -> list[str]:
+    """Get hex codes seen in the last N days that haven't been enriched."""
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         
-        # Build query
-        query = """
-            SELECT DISTINCT a.hex 
+        # Get aircraft seen recently that don't have enrichment
+        cursor.execute("""
+            SELECT DISTINCT a.hex, MAX(a.timestamp) as last_seen, COUNT(*) as ping_count
             FROM aircraft a
             LEFT JOIN aircraft_enriched e ON a.hex = e.hex
-            WHERE (e.hex IS NULL OR e.registration IS NULL) 
+            WHERE a.timestamp > ? 
+              AND (e.hex IS NULL OR e.registration IS NULL)
               AND a.hex IS NOT NULL
-            ORDER BY a.hex
-        """
+            GROUP BY a.hex
+            ORDER BY last_seen DESC, ping_count DESC
+            LIMIT ?
+        """, (cutoff_date, limit))
         
-        if limit:
-            query += f" LIMIT {limit}"
-            
-        cursor.execute(query)
-        codes = [row[0] for row in cursor.fetchall()]
+        results = cursor.fetchall()
         
-        if DEBUG and codes:
-            debug_print(f"Found {len(codes)} hex codes. First 5: {codes[:5]}")
-        return codes
+        if DEBUG and results:
+            debug_print(f"Found {len(results)} recent aircraft to enrich")
+            debug_print(f"Most recent: {results[0][0]} last seen {results[0][1]}")
+        
+        return [row[0] for row in results]
 
-def get_stats() -> tuple:
+def get_todays_unenriched_hex_codes(limit: int = 50) -> list[str]:
+    """Get hex codes from today that need enrichment."""
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT DISTINCT a.hex, COUNT(*) as ping_count
+            FROM aircraft a
+            LEFT JOIN aircraft_enriched e ON a.hex = e.hex
+            WHERE a.timestamp >= ?
+              AND (e.hex IS NULL OR e.registration IS NULL)
+              AND a.hex IS NOT NULL
+            GROUP BY a.hex
+            ORDER BY ping_count DESC
+            LIMIT ?
+        """, (today_start, limit))
+        
+        results = cursor.fetchall()
+        return [row[0] for row in results]
+
+def get_stats() -> dict:
     """Get enrichment statistics."""
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
+        
+        # Overall stats
         cursor.execute("SELECT COUNT(DISTINCT hex) FROM aircraft")
         total = cursor.fetchone()[0]
+        
         cursor.execute("SELECT COUNT(*) FROM aircraft_enriched WHERE registration IS NOT NULL")
         enriched = cursor.fetchone()[0]
-        return total, enriched
+        
+        # Recent stats
+        recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        cursor.execute("""
+            SELECT COUNT(DISTINCT a.hex) as recent_total,
+                   COUNT(DISTINCT CASE WHEN e.registration IS NOT NULL THEN a.hex END) as recent_enriched
+            FROM aircraft a
+            LEFT JOIN aircraft_enriched e ON a.hex = e.hex
+            WHERE a.timestamp > ?
+        """, (recent_cutoff,))
+        
+        recent_total, recent_enriched = cursor.fetchone()
+        
+        # Today's stats
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        cursor.execute("""
+            SELECT COUNT(DISTINCT a.hex) as today_total,
+                   COUNT(DISTINCT CASE WHEN e.registration IS NOT NULL THEN a.hex END) as today_enriched
+            FROM aircraft a
+            LEFT JOIN aircraft_enriched e ON a.hex = e.hex
+            WHERE a.timestamp >= ?
+        """, (today_start,))
+        
+        today_total, today_enriched = cursor.fetchone()
+        
+        return {
+            'total': total,
+            'enriched': enriched,
+            'recent_total': recent_total,
+            'recent_enriched': recent_enriched,
+            'today_total': today_total,
+            'today_enriched': today_enriched
+        }
 
 def enrich_from_adsbdb(hex_code: str) -> Optional[Dict]:
     """Use the free ADS-B Database API - no key required!"""
     try:
-        # Make sure hex code is uppercase and clean
         hex_clean = hex_code.strip().upper()
         url = f"https://api.adsbdb.com/v0/aircraft/{hex_clean}"
         
@@ -94,15 +154,14 @@ def enrich_from_adsbdb(hex_code: str) -> Optional[Dict]:
             if DEBUG:
                 debug_print(f"Response JSON:\n{json.dumps(data, indent=2)}")
             
-            # The structure is response.aircraft
             if 'response' in data and isinstance(data['response'], dict):
                 ac = data['response'].get('aircraft')
                 if ac:
                     return {
                         'registration': ac.get('registration'),
-                        'type': ac.get('icao_type'),  # Use icao_type for consistency
+                        'type': ac.get('icao_type'),
                         'manufacturer': ac.get('manufacturer'),
-                        'operator': ac.get('registered_owner'),  # This is the actual field name
+                        'operator': ac.get('registered_owner'),
                         'origin_country': ac.get('registered_owner_country_name'),
                         'source': 'adsbdb'
                     }
@@ -138,93 +197,64 @@ def save_enrichment(hex_code: str, data: Dict):
         conn.commit()
 
 def main():
-    if DEBUG:
-        print("[DEBUG] Debug mode enabled")
-        print(f"[DEBUG] Database path: {DB_PATH}")
-    
-    if BACKFILL:
-        print("[INFO] BACKFILL mode - processing ALL unenriched aircraft")
-        print("[INFO] This will take a while but will respect API rate limits")
+    if "--help" in sys.argv:
+        print("Usage: python3 enrich_recent_aircraft.py [options]")
+        print("Options:")
+        print("  --debug         Show detailed debug output")
+        print("  --days N        Look back N days for aircraft (default: 7)")
+        print("  --today-only    Only enrich aircraft seen today")
+        print("  --batch-size    Manually set batch size (default: 100)")
+        print("  --help          Show this help message")
+        print("\nThis script prioritizes recently seen aircraft for enrichment.")
+        sys.exit(0)
     
     setup_enrichment_table()
     
     # Show current stats
-    total, enriched = get_stats()
-    print(f"[INFO] Database stats: {enriched}/{total} aircraft enriched")
-    
-    # Get batch of unenriched aircraft
-    if BACKFILL:
-        limit = None  # Get all unenriched
-    elif DEBUG:
-        limit = 5
+    stats = get_stats()
+    print(f"[INFO] Database statistics:")
+    print(f"  Total: {stats['enriched']}/{stats['total']} aircraft enriched")
+    print(f"  Last 7 days: {stats['recent_enriched']}/{stats['recent_total']} enriched")
+    print(f"  Today: {stats['today_enriched']}/{stats['today_total']} enriched")
+
+    # Get aircraft to enrich
+    if "--today-only" in sys.argv:
+        print(f"\n[INFO] Enriching today's aircraft only")
+        hex_codes = get_todays_unenriched_hex_codes(limit=BATCH_SIZE)
     else:
-        limit = 50  # Normal batch size
-        
-    hex_codes = get_unenriched_hex_codes(limit=limit)
+        print(f"\n[INFO] Enriching aircraft from last {RECENT_DAYS} days")
+        hex_codes = get_recent_unenriched_hex_codes(days=RECENT_DAYS, limit=BATCH_SIZE)
     
     if not hex_codes:
-        print("[INFO] All aircraft are already enriched!")
+        print("[INFO] No recent aircraft need enrichment!")
         return
-        
-    print(f"[INFO] Found {len(hex_codes)} aircraft to enrich")
     
-    if BACKFILL and len(hex_codes) > 100:
-        # Estimate time for backfill
-        seconds_needed = len(hex_codes) * 0.5  # 0.5 seconds per aircraft (0.3 + buffer)
-        minutes = int(seconds_needed / 60)
-        print(f"[INFO] Estimated time: ~{minutes} minutes")
-        print("[INFO] You can stop anytime with Ctrl+C (progress is saved)")
-        time.sleep(3)  # Give user time to read
+    print(f"[INFO] Found {len(hex_codes)} aircraft to enrich")
     
     success_count = 0
     not_found_count = 0
     start_time = time.time()
     
-    try:
-        for i, hex_code in enumerate(hex_codes):
-            # Progress display logic
-            show_progress = False
+    for i, hex_code in enumerate(hex_codes):
+        if i % 10 == 0 or DEBUG:
+            print(f"[{i+1}/{len(hex_codes)}] Enriching {hex_code}...", end='', flush=True)
+        
+        data = enrich_from_adsbdb(hex_code)
+        
+        if data and data.get('registration'):
+            save_enrichment(hex_code, data)
+            if i % 10 == 0 or DEBUG:
+                print(f" ✓ {data['registration']} ({data.get('type', 'Unknown')}) - {data.get('operator', 'Unknown operator')}")
+            success_count += 1
+        else:
+            save_enrichment(hex_code, {'source': 'not_found'})
             if DEBUG:
-                show_progress = True
-            elif BACKFILL and (i % 50 == 0 or i == len(hex_codes) - 1):
-                show_progress = True
-                # Show time estimate
-                if i > 0:
-                    elapsed = time.time() - start_time
-                    rate = i / elapsed
-                    remaining = (len(hex_codes) - i) / rate
-                    print(f"\n[PROGRESS] {i}/{len(hex_codes)} ({i*100//len(hex_codes)}%) - "
-                          f"~{int(remaining/60)} minutes remaining", flush=True)
-            elif not BACKFILL and i % 10 == 0:
-                show_progress = True
-            
-            if show_progress:
-                print(f"[{i+1}/{len(hex_codes)}] Enriching {hex_code}...", end='', flush=True)
-            
-            data = enrich_from_adsbdb(hex_code)
-            
-            if data and data.get('registration'):  # We got useful data
-                save_enrichment(hex_code, data)
-                if show_progress:
-                    print(f" ✓ {data['registration']} ({data.get('type', 'Unknown')}) - {data.get('operator', 'Unknown operator')}")
-                success_count += 1
-            else:
-                # Save empty record so we don't keep retrying
-                save_enrichment(hex_code, {'source': 'not_found'})
-                if show_progress and DEBUG:
-                    print(" ✗ Not found")
-                not_found_count += 1
-            
-            # Rate limiting - be nice to free API
-            if i < len(hex_codes) - 1:  # Don't sleep after last one
-                if BACKFILL:
-                    time.sleep(0.5)  # Slower for backfill to be extra respectful
-                else:
-                    time.sleep(0.3)  # Normal rate
-                    
-    except KeyboardInterrupt:
-        print(f"\n\n[STOPPED] User interrupted. Progress saved.")
-        print(f"[INFO] Enriched {success_count} aircraft before stopping")
+                print(" ✗ Not found")
+            not_found_count += 1
+        
+        # Rate limiting
+        if i < len(hex_codes) - 1:
+            time.sleep(0.3)
     
     # Final stats
     elapsed_time = int(time.time() - start_time)
@@ -232,33 +262,10 @@ def main():
     print(f"[TIME] Total time: {elapsed_time//60}m {elapsed_time%60}s")
     
     # Show new stats
-    total, enriched = get_stats()
-    print(f"[INFO] New stats: {enriched}/{total} aircraft enriched")
-    
-    # Show some examples of enriched aircraft
-    if success_count > 0 and not DEBUG:
-        print("\n[INFO] Sample enriched aircraft:")
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT hex, registration, type, operator 
-                FROM aircraft_enriched 
-                WHERE registration IS NOT NULL 
-                ORDER BY last_updated DESC 
-                LIMIT 5
-            """)
-            for row in cursor.fetchall():
-                print(f"  {row[0]}: {row[1]} ({row[2]}) - {row[3]}")
+    new_stats = get_stats()
+    print(f"\n[INFO] Updated statistics:")
+    print(f"  Today: {new_stats['today_enriched']}/{new_stats['today_total']} enriched")
+    print(f"  Last 7 days: {new_stats['recent_enriched']}/{new_stats['recent_total']} enriched")
 
 if __name__ == "__main__":
-    # Show usage if needed
-    if "--help" in sys.argv:
-        print("Usage: python3 enrich_aircraft.py [options]")
-        print("Options:")
-        print("  --debug     Show detailed debug output (processes 5 aircraft)")
-        print("  --backfill  Process ALL unenriched aircraft (respectfully)")
-        print("  --help      Show this help message")
-        print("\nNormal usage processes 50 aircraft at a time.")
-        sys.exit(0)
-        
     main()
